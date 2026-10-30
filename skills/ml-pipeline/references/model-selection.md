@@ -25,18 +25,27 @@ written reason in the `Model rationale:` block.
 
 ## Imbalanced target (`imbalanced`: minority class under 10%)
 - Metric: average precision (PR-AUC) primary; recall at a fixed precision or F1 at a chosen
-  threshold; never accuracy for model selection (the hook denies `scoring="accuracy"`).
+  threshold; never accuracy for model selection (the hook denies `scoring="accuracy"`). Always pass
+  `scoring=` explicitly: estimators like `LogisticRegressionCV` default to accuracy, which the hook
+  cannot see.
 - First try `class_weight="balanced"` / `scale_pos_weight`; if you resample, `fit_resample` on the
   training split only (the hook denies anything else).
 - The majority-class dummy baseline shows exactly what accuracy hides.
+- Pick the decision threshold with `TunedThresholdClassifierCV` on train (internal CV) or on
+  validation, never test. Calibrate on data the model was not fit on:
+  `CalibratedClassifierCV(FrozenEstimator(model))` (`cv="prefit"` is deprecated); sigmoid below
+  ~1,000 samples, isotonic above.
 
 ## High-cardinality categoricals (`high_card_categoricals`: more than 50 levels)
-- Prefer CatBoost, or target / ordinal encoding fit on train inside a pipeline object.
+- Prefer CatBoost, or target / ordinal encoding fit on train inside a pipeline object. For
+  `TargetEncoder`, use `fit_transform(X_train, y_train)` (it cross-fits); `fit` then `transform` on the
+  same rows leaks the target.
 - Avoid one-hot encoding (width explosion, and leakage if fit on all rows).
 
 ## Temporal data (`has_datetime`)
 - Split: chronological — `guard.split(time_col=...)`; validation is the period after train, test the
-  latest period; `TimeSeriesSplit` for CV. Random splits and k-fold are denied by the hook.
+  latest period; `TimeSeriesSplit` for CV, with `gap=` at least the longest lag/window or the forecast
+  horizon. Random splits and k-fold are denied by the hook.
 - Features: lags and rolling statistics computed only from the past; calendar features.
 - Baseline: last value / seasonal naive for forecasting; logistic on lag features for temporal
   classification. Strong default: gradient boosting on lag features; ETS / ARIMA for univariate series.
@@ -45,6 +54,8 @@ written reason in the `Model rationale:` block.
 ## Repeated entities (`has_groups`: patients, users, devices, sites)
 - Split by group — `guard.split(group_col=...)`, `GroupKFold` for CV. Row-level splits are denied.
 - Avoid: features that identify the entity; the model memorizes it instead of learning.
+- Both temporal and grouped: `guard.split(time_col=...)` wins and ignores `group_col`. Tell the user,
+  then check how many groups appear in more than one split and report it.
 
 ## Text
 - Baseline: TF-IDF (1–2 grams) + logistic regression or linear SVM.
@@ -56,6 +67,10 @@ written reason in the `Model rationale:` block.
   pretrained backbone with augmentation applied after the split.
 - Avoid: training from scratch below ~100,000 images; augmenting before splitting; random splits when
   images share a source (patient, device, session → group split).
+
+Text or images with fewer than 5,000 items: fine-tuning a pretrained model trips
+`neural-net-small-data`. Try the frozen-features baseline first; fine-tune only after the user agrees,
+recording the red-flag override with reason "pretrained backbone".
 
 ## Interpretability required
 - Logistic / linear with monotone constraints, GAM / EBM, shallow trees; gradient boosting with

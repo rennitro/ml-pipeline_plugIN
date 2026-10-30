@@ -1,6 +1,6 @@
 ---
 name: ml-pipeline
-description: MANDATORY whenever a task involves training, fine-tuning, tuning, or evaluating a machine-learning model on data (tabular, time series, text, images — any modality). Enforces a strict 16-step pipeline that starts with inspecting the raw data, gates each phase behind the user's explicit permission, and produces marimo notebooks with matplotlib visuals so the user can see and understand every step. Never jump straight to model training.
+description: MANDATORY whenever a task involves training, fine-tuning, tuning, or evaluating a machine-learning model on data (tabular, time series, text, images — any modality), e.g. "predict churn", "build a classifier", "forecast sales". Not for LLM prompt evals or calling an existing model's API. Enforces a strict 16-step pipeline that starts with inspecting the raw data, gates each phase behind the user's explicit permission, and produces marimo notebooks with matplotlib visuals so the user can see and understand every step. Never jump straight to model training.
 ---
 
 # ML Pipeline Discipline
@@ -34,6 +34,9 @@ RAW DATA
   → 16. Monitoring + retraining plan
   ──────────── GATE D: wrap-up report ───────────
 ```
+
+Gate D is the closing report: the final test number against baseline and validation, what the
+model can and cannot be trusted for (population, time range), and the monitoring plan.
 
 ## Phase gates — explicit permission, every time
 
@@ -72,8 +75,9 @@ parses it:
 A line that says a gate is `todo`, `pending`, or `not yet approved` never counts as approval.
 
 After recording a gate approval in a git repository, checkpoint it:
-`git add -A && git commit -m "ml-pipeline: Gate X approved" && git tag -f gate-X`. Every approved
-phase is then a reproducible point to return to.
+`git add ml_pipeline/ && git commit -m "ml-pipeline: Gate X approved" && git tag -f gate-X` (plus
+any code files you changed; never raw data, model binaries, or secrets). Every approved phase is then
+a reproducible point to return to. Outside a git repository, skip this and never `git init` unasked.
 
 Before recording `Gate B: approved`, PIPELINE.md must contain a model rationale in exactly this shape
 (the hook checks the five bullets exist; the user judges their content):
@@ -92,11 +96,12 @@ Model rationale:
 - **The workbench is a marimo notebook**, not loose scripts. Keep notebooks in
   `ml_pipeline/`: `01_eda.py` (steps 1–3), `02_prep.py` (steps 4–8), `03_model.py`
   (steps 9–12), `04_eval.py` (steps 13–16). In Claude Code, drive them live with the
-  `marimo-pair` skill so the user watches the work happen. In other harnesses, write the
-  notebook files and tell the user to open them with `marimo edit <file>`.
+  `marimo-pair` skill so the user watches the work happen. If it is unavailable, or in other
+  harnesses, write the notebook files and tell the user to open them with `marimo edit <file>`.
 - **Every step that looks at data produces matplotlib figures** (seaborn on top is fine).
-  Also save each figure to `ml_pipeline/figures/<step>_<name>.png` so gates can reference
-  them even without a live notebook.
+  Save every figure with `guard.fig(step, name, figure, explanation)`: it writes
+  `ml_pipeline/figures/NN_<name>.png` and the `- Figure NN_<name>.png: …` line the hook checks.
+  A PNG saved by hand has no such line and blocks the gate.
 - **Explain every figure in 1–2 plain sentences**: what it shows and why it matters for
   the next decision. A figure without an explanation is not done.
 
@@ -105,16 +110,23 @@ Model rationale:
 1. **Data inspection** — copy the plugin's guard library to `ml_pipeline/guard.py` (its path is given at
    session start; in Codex/Kimi it is `skills/ml-pipeline/lib/mlpipeline_guard.py` next to this file),
    load the raw data read-only, and run `guard.profile(df, target=..., time_col=..., group_col=...)`.
+   Parse every date-like column first (`parse_dates=` / `pd.to_datetime`): the guard only recognises
+   real datetime dtypes, and a date left as a string slips past the temporal-split check.
    Read `ml_pipeline/data_profile.json` before anything else: its `leakage_suspects` and `traits`
    decide the split, the metric, and the model family. Report rows × columns, column kinds, missing
    values, duplicates, and every leakage suspect. For images or text, build a manifest table first
-   (path, label, size or length) and profile that. No modification yet.
+   (path, label, size or length) and profile that. No modification yet. Record in PIPELINE.md the
+   raw file's SHA-256 and row count, one `SEED` reused by every split/model/CV, and the Python and
+   library versions. If a later session finds a different hash, tell the user: the profile and
+   every gate after it are redone.
 2. **EDA** — `guard.eda_figures(df, target=..., time_col=...)` writes the required figures
    (`01_missingness`, `02_target_balance`, `02_distributions`, `02_correlations`, `02_temporal_coverage`
    when a date column exists) with explanations computed from the data; add any others with
-   `guard.fig(step, name, figure, explanation)`. If matplotlib is missing, install it — text
-   descriptions are not figures and the gate will not accept them. Output: the figures, your
-   interpretation of each, and a short list of hypotheses and problems spotted.
+   `guard.fig(step, name, figure, explanation)`. Gate A needs two `02_*` figures; data with no
+   numeric columns (text, images) may get only one, so add e.g. a length or size distribution.
+   If matplotlib is missing, install it — text descriptions are not figures and the gate will not
+   accept them. Output: the figures, your interpretation of each, and a short list of hypotheses
+   and problems spotted.
 3. **Define the prediction problem** — write a short contract: target (exact definition,
    units), prediction unit and population, prediction time/horizon, information actually
    available at prediction time, objective, evaluation metric, constraints. **The user must
@@ -122,19 +134,22 @@ Model rationale:
    `references/model-selection.md` with the profile's traits when choosing the metric and the
    candidate model families.
 4. **Data cleaning** — missing values, duplicates, invalid/impossible values, inconsistent
-   categories, unit/format issues. Report before/after counts for every rule. Document every
-   rule in PIPELINE.md. Prefer preserving data over deleting. Never use information from the
-   future or from the test rows to decide a cleaning rule.
+   categories, unit/format issues. Report before/after counts for every rule, drawn as a `04_*`
+   figure (Gate B needs it). Document every rule in PIPELINE.md. Prefer preserving data over
+   deleting. Only row-by-row fixes run here (typos, units, impossible values); anything computed
+   from the data (fill values, outlier caps, rare-category merges) is decided now but fit on train
+   at step 8.
 5. **Data engineering** — joins/integration, aggregation, time alignment to an index date,
    business rules, one-row-per-prediction-unit feature table, data-quality checks
    (row counts, uniqueness, ranges).
-6. **Split before any fitting** — copy the plugin's guard library to `ml_pipeline/guard.py`
-   (its path is given at session start; in Codex/Kimi it is `skills/ml-pipeline/lib/mlpipeline_guard.py`
-   next to this file) and split with it:
+6. **Split before any fitting** — with the guard copied at step 1:
    `train, val, test = guard.split(df, target=..., time_col=<col> if the data is temporal, group_col=<col> if the same entity appears in multiple rows)`.
    It drops exact duplicates, refuses a random split when a datetime column exists, keeps groups
    together, checks that no row lands in two splits, and freezes a fingerprint of the test set.
-   The test set is touched exactly once, at step 14, through `guard.final_test()`.
+   The test set is touched exactly once, at step 14, through `guard.final_test()`. If the guard
+   raises a `LeakageError` (`TemporalSplitRequired`, `OverlapLeakage`, `TestSetTampered`,
+   `TestSetAlreadyUsed`), stop and tell the user; never cast away a date column or delete
+   `.guard_state.json` to get past it.
 7. **Feature engineering** — design features on the training set's statistics only, then
    apply the same transformations to validation/test.
 8. **Preprocessing** — scalers, encoders, imputers fit on train only, wrapped in a pipeline
@@ -148,10 +163,15 @@ Model rationale:
     part of tuning.
 12. **Model evaluation** — the contract's metric plus supporting views: confusion matrix and
     ROC/PR curves for classification, residual plots for regression, always compared to the
-    baseline. Figures required.
-13. **Error analysis** — worst predictions, performance by slice/subgroup, calibration,
-    where the model fails and a hypothesis for why.
-14. **Final test** — `score = guard.final_test(model.predict, test, target=..., metric_fn=...)`.
+    baseline. Report the CV spread (± std) or a bootstrap interval, not a single number. Figures
+    required.
+13. **Error analysis** — on the validation set, never test: worst predictions, performance by
+    slice/subgroup, calibration, where the model fails and a hypothesis for why. At least one
+    `13_*` figure (Gate D needs it).
+14. **Final test** — `score = guard.final_test(pipe.predict, test, target=..., metric_fn=...)`.
+    Pass the raw frozen `test` frame (never a transformed copy) and the whole fitted pipeline
+    (preprocessing + model); for score-based metrics such as PR-AUC pass
+    `lambda X: pipe.predict_proba(X)[:, 1]`.
     It verifies the frame is the frozen test set, refuses a second call, and logs the result to
     PIPELINE.md. Report the number honestly, even if it is worse than validation. No going back to
     tune on it — if the result forces changes, agree a new test strategy with the user and record
@@ -199,7 +219,6 @@ have no hook support, so there the same rules apply as instructions only.
   seed, a feature, or a threshold. Validation only.
 - Every gate is recorded with its figures on disk and their explanations in PIPELINE.md. A figure
   that was described but not drawn does not exist.
-- Test set is used exactly once. No tuning, no peeking, no "just checking".
 - All fitting (cleaning statistics, features, preprocessing, models) uses training data only.
 - Temporal data gets temporal splits; repeated entities get group splits.
 - Baseline before any complex model; every result is reported relative to it.

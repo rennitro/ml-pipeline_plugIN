@@ -37,6 +37,12 @@ class SessionStart(unittest.TestCase):
         self.assertIn("ml_pipeline/guard.py", context)
         self.assertIn("/plug/skills/ml-pipeline/references/model-selection.md", context)
 
+    def test_windows_root_uses_forward_slashes(self):
+        result = run({"CLAUDE_PLUGIN_ROOT": "C:\\plug\\"})
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("C:/plug/lib/mlpipeline_guard.py", context)
+        self.assertNotIn("\\", context)
+
     def test_silent_without_plugin_root(self):
         self.assertEqual(run({}), {})
 

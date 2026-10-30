@@ -236,6 +236,18 @@ class GateRecording(unittest.TestCase):
         cmd = {"command": "echo '- Gate A: approved 2026-09-16' >> ml_pipeline/PIPELINE.md"}
         self.assertEqual(run(cmd, pipeline_md="")[0], "deny")
 
+    def test_python_writing_the_ledger_is_checked(self):
+        code = {"file_path": "/x/record.py", "content": f"open('ml_pipeline/PIPELINE.md', 'a').write({GATE_AB!r})"}
+        self.assertEqual(run(code, pipeline_md="", tool="Write")[0], "deny")
+
+    def test_grep_for_a_gate_line_is_not_a_recording(self):
+        line = GATE_AB.splitlines()[-1]
+        self.assertEqual(run({"command": f"grep -cF '{line}' skills/ml-pipeline/SKILL.md"}, pipeline_md="")[0], "allow")
+
+    def test_editing_a_doc_that_quotes_a_gate_line_is_allowed(self):
+        doc = {"file_path": "/x/SKILL.md", "content": "Record it in PIPELINE.md:\n" + GATE_AB}
+        self.assertEqual(run(doc, pipeline_md="", tool="Write")[0], "allow")
+
     def test_negated_line_is_not_a_recording(self):
         self.assertEqual(run(write_md("- Gate A: not yet approved\n"), pipeline_md="", tool="Write")[0], "allow")
 

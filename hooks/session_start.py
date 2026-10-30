@@ -15,13 +15,15 @@ def main() -> int:
     if not root:
         print("{}")
         return 0
-    lib = os.path.join(root, "lib")
+    # Forward slashes on every OS: Windows accepts them, and backslashes get eaten by bash escaping.
+    root = root.replace("\\", "/").rstrip("/")
+    lib = f"{root}/lib"
     context = (
         "ml-pipeline runtime helpers: guard library at "
-        f"{os.path.join(lib, 'mlpipeline_guard.py')} - copy it to ml_pipeline/guard.py at step 1 (profile) and use "
+        f"{lib}/mlpipeline_guard.py - copy it to ml_pipeline/guard.py at step 1 (profile) and use "
         "guard.profile() / guard.eda_figures() / guard.fig() / guard.split() / guard.final_test(); model-selection "
-        f"playbook at {os.path.join(root, 'skills', 'ml-pipeline', 'references', 'model-selection.md')} (read at step 3 "
-        f"and before Gate B); canary dataset generator at {os.path.join(lib, 'mlpipeline_canary.py')} "
+        f"playbook at {root}/skills/ml-pipeline/references/model-selection.md (read at step 3 "
+        f"and before Gate B); canary dataset generator at {lib}/mlpipeline_canary.py "
         "(honest accuracy ceiling 0.80; above it means leakage)."
     )
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}))
