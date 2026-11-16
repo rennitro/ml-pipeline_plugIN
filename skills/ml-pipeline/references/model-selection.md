@@ -95,7 +95,8 @@ the step-5 table with `target=...` before choosing anything from this playbook.
 - Choose the number of segments on validation with silhouette, segment sizes, and stability across
   resamples and periods — and cap it at what the client can act on.
 - Metric: silhouette plus stability on the held-out period; the final check is
-  `guard.final_test(pipe.predict, test, metric_fn=silhouette_score)`, once.
+  `guard.final_test(pipe.predict, test, metric_fn=silhouette_score, features_fn=pipe[:-1].transform)`,
+  once — the metric sees the preprocessed features, as the clustering did.
 - Avoid: clustering unscaled features (the widest column decides everything); identifiers and
   near-duplicate features; DBSCAN on high-dimensional tables; judging segments by silhouette alone
   when nobody can name or use them. The step-by-step mapping is in `use-cases.md`.

@@ -237,6 +237,7 @@ def final_test(
     *,
     target: str | None = None,
     metric_fn,
+    features_fn=None,
     state_dir: str | Path = "ml_pipeline",
     pipeline_md: str | Path = "ml_pipeline/PIPELINE.md",
 ) -> float:
@@ -246,8 +247,19 @@ def final_test(
     only writes after the user agreed a new test strategy.
 
     With ``target=None`` (segmentation) ``predict_fn`` assigns segments to the held-out rows and
-    ``metric_fn(features, labels)`` scores them, e.g. a silhouette score.
+    ``metric_fn(features_fn(test), labels)`` scores them, e.g. a silhouette score. ``features_fn``
+    is required there: a distance metric on the raw frame is ruled by unscaled columns and IDs, and
+    fails on text. Pass the fitted preprocessing, ``features_fn=pipe[:-1].transform``, or
+    ``features_fn=lambda X: X`` to score the raw frame on purpose.
     """
+    if target is None and features_fn is None:
+        raise ValueError(
+            "segmentation needs features_fn: pass the fitted preprocessing, e.g. "
+            "features_fn=pipe[:-1].transform, so metric_fn scores the same features the model "
+            "clustered (features_fn=lambda X: X scores the raw frame on purpose)"
+        )
+    if target is not None and features_fn is not None:
+        raise ValueError("features_fn is only for target=None; a supervised metric compares labels")
     state_path = Path(state_dir) / STATE_FILE
     pipeline_md = Path(pipeline_md)
     if not state_path.is_file():
@@ -267,7 +279,8 @@ def final_test(
         )
 
     if target is None:
-        score = float(metric_fn(test, np.asarray(predict_fn(test))))
+        labels = np.asarray(predict_fn(test))
+        score = float(metric_fn(features_fn(test), labels))
     else:
         features = test.drop(columns=[target])
         score = float(metric_fn(test[target].to_numpy(), np.asarray(predict_fn(features))))

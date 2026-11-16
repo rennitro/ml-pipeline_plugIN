@@ -219,7 +219,9 @@ Clustering runs through the same 16 steps and the same gates. Profile with
 `guard.profile(df, task="clustering")`, then leave `target` out of `guard.eda_figures`,
 `guard.split` and `guard.final_test`: the split still holds out a frozen set (a later period when
 the data has dates) and refuses to run without a clustering profile, and
-`guard.final_test(pipe.predict, test, metric_fn=...)` calls `metric_fn(features, labels)` once to
+`guard.final_test(pipe.predict, test, metric_fn=silhouette_score, features_fn=pipe[:-1].transform)`
+calls `metric_fn(features_fn(test), labels)` once — on the preprocessed features the model clustered,
+never the raw frame with its IDs and unscaled columns (`features_fn` is required) — to
 check that the segments hold on unseen rows. The baseline is a rule the business
 already uses (RFM, existing segments); the contract states what the segments are for and how many
 the client can act on. The step-by-step mapping is in `references/use-cases.md`.

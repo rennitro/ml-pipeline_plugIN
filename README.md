@@ -7,7 +7,7 @@ test set honest.
 
 ![The pipeline: 16 steps in 4 phases, each phase ending in an approval gate](assets/pipeline.svg)
 
-Version 0.5.1 · Apache-2.0 · based on [jananthan30/ml-pipeline](https://github.com/jananthan30/ml-pipeline)
+Version 0.5.2 · Apache-2.0 · based on [jananthan30/ml-pipeline](https://github.com/jananthan30/ml-pipeline)
 
 ## Install
 
@@ -165,10 +165,19 @@ guard.profile(df, task="clustering")
 train, val, test = guard.split(df, time_col="order_date")
 ```
 
-The gates stay the same. At step 14, `guard.final_test(pipe.predict, test, metric_fn=...)` calls
-`metric_fn(features, labels)` once on the held-out rows. The features it receives are the raw
-frame, so compute the metric on the preprocessed features yourself, for example
-`metric_fn=lambda X, labels: silhouette_score(pipe[:-1].transform(X), labels)`.
+The gates stay the same. At step 14 the held-out rows are scored once, on the same preprocessed
+features the model clustered:
+
+```python
+from sklearn.metrics import silhouette_score
+
+score = guard.final_test(pipe.predict, test, metric_fn=silhouette_score,
+                         features_fn=pipe[:-1].transform)
+```
+
+`features_fn` is required without a target: a distance metric on the raw frame is ruled by
+unscaled columns and IDs, and fails on text. To score the raw frame on purpose, pass
+`features_fn=lambda X: X`.
 
 ### Check a pipeline for leakage with the canary
 
@@ -237,7 +246,7 @@ without `stratify=` or on data that mentions dates.
 | `eda_figures(df, *, target=None, time_col=None)` | 2 | Draws the required `01_*` and `02_*` figures with explanations computed from the data. |
 | `fig(step, name, figure, explanation)` | any | Saves `figures/NN_<name>.png` and its `- Figure` line. |
 | `split(df, *, target=None, time_col=None, group_col=None, test_size=0.2, val_size=0.2, seed=0)` | 6 | Drops duplicates, splits by time or group when asked, checks overlap, freezes the test set. |
-| `final_test(predict_fn, test, *, target=None, metric_fn)` | 14 | Scores the frozen test set once and logs `- Step 14 final test:`. |
+| `final_test(predict_fn, test, *, target=None, metric_fn, features_fn=None)` | 14 | Scores the frozen test set once and logs `- Step 14 final test:`. Without a target, `features_fn` (e.g. `pipe[:-1].transform`) is required. |
 
 Every function also takes `state_dir="ml_pipeline"`; `final_test` takes
 `pipeline_md="ml_pipeline/PIPELINE.md"`.

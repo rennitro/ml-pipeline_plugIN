@@ -100,7 +100,7 @@ locked until Gate B like any other model, and the final check until Gate C.
 | 10–11 Training, tuning | compare candidates on validation | compare algorithms and the number of segments on validation: silhouette, segment sizes, stability across resamples |
 | 12 Evaluation | contract metric vs baseline | silhouette plus a segment-profile figure (`12_*`), compared with the baseline segments |
 | 13 Error analysis | worst predictions, slices | segments that are tiny, unstable, or that the business cannot tell apart (`13_*`) |
-| 14 Final test | one score on the frozen test set | `guard.final_test(pipe.predict, test, metric_fn=silhouette_score)` once — `metric_fn` receives `(features, labels)`. Report how far it falls below validation |
+| 14 Final test | one score on the frozen test set | `guard.final_test(pipe.predict, test, metric_fn=silhouette_score, features_fn=pipe[:-1].transform)` once — `metric_fn` receives the preprocessed features and the labels. Report how far it falls below validation |
 
 The `Model rationale:` block keeps its five bullets: `traits` (clustering, rows, scale of the
 features), `baseline` (RFM), `candidates`, `ruled out`, `metric` (silhouette + stability).

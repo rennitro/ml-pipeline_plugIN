@@ -336,12 +336,46 @@ class Segmentation(unittest.TestCase):
         def assign(features):
             return np.zeros(len(features), dtype=int)
 
-        score = guard.final_test(assign, te, metric_fn=segment_quality, state_dir=self.state, pipeline_md=self.md)
+        def scaled(X):
+            return ((X[["a"]] - X["a"].mean()) / X["a"].std()).to_numpy()
+
+        score = guard.final_test(assign, te, metric_fn=segment_quality, features_fn=scaled,
+                                 state_dir=self.state, pipeline_md=self.md)
         self.assertEqual(score, 0.5)
-        self.assertEqual(seen, {"shape": te.shape, "n_labels": len(te)})
+        self.assertEqual(seen, {"shape": (len(te), 1), "n_labels": len(te)})
         self.assertIn("- Step 14 final test: segment_quality=0.5000", self.md.read_text())
         with self.assertRaises(guard.TestSetAlreadyUsed):
-            guard.final_test(assign, te, metric_fn=segment_quality, state_dir=self.state, pipeline_md=self.md)
+            guard.final_test(assign, te, metric_fn=segment_quality, features_fn=scaled,
+                             state_dir=self.state, pipeline_md=self.md)
+
+    def test_final_test_without_features_fn_refuses_the_raw_frame(self):
+        df = self._df().assign(segment_name=np.where(np.arange(1000) % 2, "a", "b"))
+        guard.profile(df, task="clustering", state_dir=self.state)
+        tr, va, te = guard.split(df, state_dir=self.state)
+        self.md.write_text("- Gate C: approved 2026-09-18\n")
+
+        def assign(features):
+            return np.zeros(len(features), dtype=int)
+
+        def numeric_quality(features, labels):
+            return float(np.asarray(features, dtype=float).mean())  # fails on a text column
+
+        with self.assertRaises(ValueError) as ctx:
+            guard.final_test(assign, te, metric_fn=numeric_quality, state_dir=self.state, pipeline_md=self.md)
+        self.assertIn("features_fn=pipe[:-1].transform", str(ctx.exception))
+        state = json.loads((self.state / guard.STATE_FILE).read_text())
+        self.assertEqual(state["test_touches"], 0)
+        score = guard.final_test(assign, te, metric_fn=numeric_quality, features_fn=lambda X: X[["a", "b"]],
+                                 state_dir=self.state, pipeline_md=self.md)
+        self.assertIsInstance(score, float)
+
+    def test_features_fn_is_refused_for_a_supervised_target(self):
+        tr, va, te = guard.split(frame(), target="y", state_dir=self.state)
+        self.md.write_text("- Gate C: approved 2026-09-18\n")
+        with self.assertRaises(ValueError):
+            guard.final_test(lambda X: np.zeros(len(X), dtype=int), te, target="y",
+                             metric_fn=lambda t, p: 0.0, features_fn=lambda X: X,
+                             state_dir=self.state, pipeline_md=self.md)
 
 
 class AuditRegressions(unittest.TestCase):
