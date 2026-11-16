@@ -59,7 +59,9 @@ baseline usually are. This file then picks the model family.
 - Split by group — `guard.split(group_col=...)`, `GroupKFold` for CV. Row-level splits are denied.
 - Avoid: features that identify the entity; the model memorizes it instead of learning.
 - Both temporal and grouped: `guard.split(time_col=...)` wins and ignores `group_col`. Tell the user,
-  then check how many groups appear in more than one split and report it.
+  then check how many groups appear in more than one split and report it. CV is then
+  `TimeSeriesSplit(gap=...)`, which the `group-split` red flag allows on temporal data; any other
+  non-group splitter stays denied.
 
 ## Text
 - Baseline: TF-IDF (1–2 grams) + logistic regression or linear SVM.
@@ -83,7 +85,10 @@ recording the red-flag override with reason "pretrained backbone".
 - Metric: MAE (or median absolute error) plus rank quality; RMSE alone is ruled by a few large values.
 - Avoid: reporting error on the log scale only (the client reads money); dropping the zeros.
 
-## Clustering / segmentation (`task: clustering` — profiled with `target=None`)
+## Clustering / segmentation (`task: clustering` — profiled with `task="clustering"`)
+
+A `task: target_pending` profile (target built at step 5) has no traits about the target: re-profile
+the step-5 table with `target=...` before choosing anything from this playbook.
 - Baseline: a rule the business already understands — RFM scoring or the existing segments.
 - Strong default: k-means or a Gaussian mixture on scaled features; k-prototypes or Gower distance
   with hierarchical clustering when categoricals matter.

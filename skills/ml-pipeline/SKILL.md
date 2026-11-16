@@ -60,7 +60,10 @@ by the user running the pipeline.
 
 If the user says "skip ahead" or "just train it": explain in 2–3 sentences which steps are
 missing and the concrete risk (usually leakage or garbage-in), then ask once for explicit
-override confirmation. If they confirm, proceed and record the override in PIPELINE.md.
+override confirmation. If they confirm, proceed and record the override in PIPELINE.md. An override
+line must name what it overrides (`Gate B`, `Gate C`, `red flag <name>`, `final test`) and carry
+`reason: <why>`; the hook refuses one without a reason, and does not ask for the skipped gate's
+figures or rationale — skipping them is what the override records.
 
 ## Progress tracking (survives across sessions)
 
@@ -123,7 +126,9 @@ Model rationale:
 1. **Data inspection** — copy the plugin's guard library to `ml_pipeline/guard.py` (its path is given at
    session start; in Codex/Kimi it is `skills/ml-pipeline/lib/mlpipeline_guard.py` next to this file),
    load the raw data read-only, and run `guard.profile(df, target=..., time_col=..., group_col=...)`.
-   Parse every date-like column first (`parse_dates=` / `pd.to_datetime`): the guard only recognises
+   If the raw data has no target yet because step 5 builds it (churn, customer value), profile with
+   `task="target_pending"`; for segmentation use `task="clustering"`. A pending profile reports no
+   class balance and no target leakage, so do not choose the metric from it. Parse every date-like column first (`parse_dates=` / `pd.to_datetime`): the guard only recognises
    real datetime dtypes, and a date left as a string slips past the temporal-split check.
    Read `ml_pipeline/data_profile.json` before anything else: its `leakage_suspects` and `traits`
    decide the split, the metric, and the model family. Report rows × columns, column kinds, missing
@@ -155,17 +160,22 @@ Model rationale:
    at step 8.
 5. **Data engineering** — joins/integration, aggregation, time alignment to an index date,
    business rules, one-row-per-prediction-unit feature table, data-quality checks
-   (row counts, uniqueness, ranges).
+   (row counts, uniqueness, ranges). When this step builds the target or the prediction-unit table,
+   re-run `guard.profile(table, target=..., time_col=..., group_col=...)` on it before the split:
+   the red flags, the imbalance check and the model choice read that profile, and `guard.split()`
+   raises `ProfileOutdated` for a target the profile on disk has not seen. Report any new leakage
+   suspects before going on.
 6. **Split before any fitting** — with the guard copied at step 1:
    `train, val, test = guard.split(df, target=..., time_col=<col> if the data is temporal, group_col=<col> if the same entity appears in multiple rows)`.
    It drops exact duplicates, refuses a random split when a datetime column exists, keeps groups
    together, checks that no row lands in two splits, and freezes a fingerprint of the test set.
    The test set is touched exactly once, at step 14, through `guard.final_test()`. If the guard
-   raises a `LeakageError` (`TemporalSplitRequired`, `OverlapLeakage`, `TestSetTampered`,
-   `TestSetAlreadyUsed`), stop and tell the user; never cast away a date column or delete
-   `.guard_state.json` to get past it. When the data is both temporal and grouped (one customer,
-   several index dates) the time split wins: count the entities that appear in more than one split
-   and report the number at Gate B.
+   raises a `LeakageError` (`TemporalSplitRequired`, `OverlapLeakage`, `ProfileOutdated`,
+   `TestSetTampered`, `TestSetAlreadyUsed`, `GateNotApproved`), stop and tell the user; never cast
+   away a date column or delete `.guard_state.json` to get past it. When the data is both temporal
+   and grouped (one customer, several index dates) the time split wins: count the entities that
+   appear in more than one split and report the number at Gate B. Cross-validation then uses
+   `TimeSeriesSplit` (the hook allows it on temporal data even when groups are set).
 7. **Feature engineering** — design features on the training set's statistics only, then
    apply the same transformations to validation/test.
 8. **Preprocessing** — scalers, encoders, imputers fit on train only, wrapped in a pipeline
@@ -191,7 +201,8 @@ Model rationale:
     Pass the raw frozen `test` frame (never a transformed copy) and the whole fitted pipeline
     (preprocessing + model); for score-based metrics such as PR-AUC pass
     `lambda X: pipe.predict_proba(X)[:, 1]`.
-    It verifies the frame is the frozen test set, refuses a second call, and logs the result to
+    It refuses to run before the ledger records Gate C (or its override), verifies the frame is the
+    frozen test set, refuses a second call, and logs the result to
     PIPELINE.md. Report the number honestly, even if it is worse than validation. No going back to
     tune on it — if the result forces changes, agree a new test strategy with the user and record
     `- Override: final test - user approved a second evaluation YYYY-MM-DD - reason: <why>`.
@@ -204,11 +215,12 @@ Model rationale:
 
 ## Segmentation and other problems without a target
 
-Clustering runs through the same 16 steps and the same gates. Pass `target=None` (or leave it out)
-to `guard.profile`, `guard.eda_figures`, `guard.split` and `guard.final_test`: the profile records
-`task: clustering`, the split still holds out a frozen set (a later period when the data has
-dates), and `guard.final_test(pipe.predict, test, metric_fn=...)` calls `metric_fn(features,
-labels)` once to check that the segments hold on unseen rows. The baseline is a rule the business
+Clustering runs through the same 16 steps and the same gates. Profile with
+`guard.profile(df, task="clustering")`, then leave `target` out of `guard.eda_figures`,
+`guard.split` and `guard.final_test`: the split still holds out a frozen set (a later period when
+the data has dates) and refuses to run without a clustering profile, and
+`guard.final_test(pipe.predict, test, metric_fn=...)` calls `metric_fn(features, labels)` once to
+check that the segments hold on unseen rows. The baseline is a rule the business
 already uses (RFM, existing segments); the contract states what the segments are for and how many
 the client can act on. The step-by-step mapping is in `references/use-cases.md`.
 
@@ -223,6 +235,7 @@ Edit, and notebook tool call, scans the code for fitting and training calls, and
 - **fitting on the test split** (`X_test`, `df_test`, `test_*`) — always, at every gate.
 - **evaluating on the test split** — `.predict/.score` or a metric function whose arguments name
   `X_test`, `df_test`, `test_*` — until `Gate C: approved …` (or `Override: Gate C …`).
+  `guard.final_test()` checks the same gate itself, however it is called.
 - **recording a gate before its artifacts exist** — `Gate A` needs `data_profile.json`, one `01_*.png`
   and two `02_*.png`; `Gate B` needs a `04_*.png` and the `Model rationale:` block; `Gate C` a
   `12_*.png`; `Gate D` a `13_*.png` and the `Step 14 final test:` line. Every PNG must be larger than
@@ -230,6 +243,7 @@ Edit, and notebook tool call, scans the code for fitting and training calls, and
 - **red flags the profile can prove** — `neural-net-small-data`, `random-split-temporal`,
   `group-split`, `accuracy-imbalanced`, `resample-before-split` (see `references/model-selection.md`).
   Override one only after the user agreed: `- Override: red flag <name> - user approved <what> YYYY-MM-DD - reason: <why>`.
+  An override unlocks only what it names: a red-flag override never opens Gate B or Gate C.
 
 A PostToolUse hook also warns (never blocks) when a result looks too good to be honest
 (accuracy/AUC/F1 ≥ 0.98) or when `train_test_split()` is called without `stratify=` or on data that

@@ -43,6 +43,38 @@ class OverlapLeakage(LeakageError):
     """Identical rows appear in more than one split."""
 
 
+class ProfileOutdated(LeakageError):
+    """The profile on disk does not describe the target being split on."""
+
+
+def _saved_profile(state_dir: Path) -> dict | None:
+    path = Path(state_dir) / "data_profile.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+
+
+def _check_profile_matches(state_dir: Path, target: str | None) -> None:
+    """split() runs on the target the profile describes, so red flags and model choice see it too."""
+    saved = _saved_profile(state_dir)
+    seen = (saved or {}).get("target") or {}
+    if target is None:
+        if seen.get("task") != "clustering":
+            raise ProfileOutdated(
+                "a split without a target is only for segmentation: run "
+                "guard.profile(df, task='clustering') first"
+            )
+    elif saved is not None and str(seen.get("name")) != str(target):
+        raise ProfileOutdated(
+            f"the profile on disk describes target {seen.get('name')!r}, not {target!r}: re-run "
+            f"guard.profile(table, target={target!r}, ...) on this table before splitting, so the "
+            "red flags and the model choice see the real target"
+        )
+
+
 def _row_hashes(df: pd.DataFrame) -> np.ndarray:
     return pd.util.hash_pandas_object(df, index=False).to_numpy()
 
@@ -122,6 +154,7 @@ def split(
         raise ValueError("test_size and val_size must be in (0, 1) and sum to less than 1")
     if target is not None and target not in df.columns:
         raise KeyError(f"target column {target!r} not in frame")
+    _check_profile_matches(Path(state_dir), target)
     if time_col is None and (dt_cols := _datetime_columns(df)):
         raise TemporalSplitRequired(
             f"datetime column(s) {dt_cols} present: pass time_col=... so the split is chronological"
@@ -169,7 +202,26 @@ class TestSetTampered(LeakageError):
     """The frame handed to final_test() is not the one frozen at split time."""
 
 
-_NEGATED = re.compile(r"\b(?:not|pending|awaiting|todo)\b", re.I)
+class GateNotApproved(LeakageError):
+    """final_test() was called before the third gate (C) was recorded."""
+
+
+_NEGATED = re.compile(r"\b(?:not|pending|awaiting|waiting|todo|unapproved|blocked|in progress)\b", re.I)
+_GATE_C = re.compile(r"^.*\bgate[ \t]*c\b.*$", re.I | re.M)
+_OVERRIDE_C = re.compile(r"^[ \t]*(?:[-*][ \t]*)?\**[ \t]*override[ \t]*\**[ \t]*:[ \t]*(?:gate[ \t]*c|final[ \t]+test)\b.*$",
+                         re.I | re.M)
+
+
+def _gate_c_open(pipeline_md: Path) -> bool:
+    """Whether the ledger records the third gate as approved, or an override for it."""
+    if not pipeline_md.is_file():
+        return False
+    text = pipeline_md.read_text(encoding="utf-8", errors="replace")
+    for match in _GATE_C.finditer(text):
+        line = match.group(0)
+        if re.search(r"\bapproved\b", line, re.I) and not _NEGATED.search(line):
+            return True
+    return any(not _NEGATED.search(m.group(0)) for m in _OVERRIDE_C.finditer(text))
 
 
 def _override_allows(pipeline_md: Path, what: str) -> bool:
@@ -200,6 +252,11 @@ def final_test(
     pipeline_md = Path(pipeline_md)
     if not state_path.is_file():
         raise LeakageError("no frozen test set: call guard.split() at step 6 first")
+    if not _gate_c_open(pipeline_md):
+        raise GateNotApproved(
+            "the test set is locked until the user approves Gate C: finish steps 9-12, get the user's "
+            "explicit approval, and record it in the ledger before calling final_test()"
+        )
     state = json.loads(state_path.read_text())
     if _fingerprint(test) != state["test_fingerprint"]:
         raise TestSetTampered("this is not the test set frozen at step 6")
@@ -297,7 +354,8 @@ def _column_stats(full: pd.Series, sample: pd.Series, kind: str) -> dict:
     return info
 
 
-NO_TARGET = {"name": None, "task": "clustering", "n_classes": None, "class_balance": None, "minority_frac": None}
+PROFILE_TASKS = ("clustering", "target_pending")
+NO_TARGET = {"name": None, "task": None, "n_classes": None, "class_balance": None, "minority_frac": None}
 
 
 def _target_info(y: pd.Series) -> dict:
@@ -354,6 +412,7 @@ def profile(
     df: pd.DataFrame,
     *,
     target: str | None = None,
+    task: str | None = None,
     time_col: str | None = None,
     group_col: str | None = None,
     state_dir: str | Path = "ml_pipeline",
@@ -361,16 +420,28 @@ def profile(
     """Step 1: describe the data and write ml_pipeline/data_profile.json.
 
     Everything later in the pipeline — figures, the model playbook, the hook's red flags — reads
-    this file instead of re-deriving facts from the data. ``target=None`` profiles a segmentation
-    problem: the task is "clustering" and there is no class balance or target leakage to report.
+    this file instead of re-deriving facts from the data.
+
+    Without a target, say why with ``task``: "clustering" for segmentation, or "target_pending" when
+    the target is only built at step 5 (churn, customer value). A pending profile reports no class
+    balance and no target leakage, so re-run ``profile(table, target=...)`` on the step-5 table;
+    ``split()`` refuses a target the profile on disk has not seen.
     """
+    if target is None and task not in PROFILE_TASKS:
+        raise ValueError(
+            "no target given: pass target=...; for segmentation pass task='clustering'; if the target "
+            "is only built at step 5 (churn, customer value) pass task='target_pending' now and re-run "
+            "guard.profile(table, target=...) on the step-5 table before guard.split()"
+        )
+    if target is not None and task is not None:
+        raise ValueError("pass either target=... or task=..., not both")
     if target is not None and target not in df.columns:
         raise KeyError(f"target column {target!r} not in frame")
     n = len(df)
     sampled = n > SAMPLE_ROWS
     sample = df.sample(SAMPLE_ROWS, random_state=0) if sampled else df
     kinds = {col: _column_kind(df[col]) for col in df.columns}
-    target_info = dict(NO_TARGET) if target is None else _target_info(df[target])
+    target_info = {**NO_TARGET, "task": task} if target is None else _target_info(df[target])
     columns = {str(col): _column_stats(df[col], sample[col], kinds[col]) for col in df.columns}
     high_card = [str(c) for c, k in kinds.items() if k == "categorical" and columns[str(c)].get("n_levels", 0) > HIGH_CARD_LEVELS]
     datetime_cols = [str(c) for c, k in kinds.items() if k == "datetime"]
@@ -398,7 +469,7 @@ def profile(
             "has_datetime": bool(datetime_cols) or time_col is not None,
             "has_groups": group_col is not None,
             "small_data": n < SMALL_DATA_ROWS,
-            "imbalanced": target_info["task"] not in ("regression", "clustering") and (minority if minority is not None else 1.0) < IMBALANCE_MINORITY,
+            "imbalanced": target_info["task"] not in ("regression", *PROFILE_TASKS) and (minority if minority is not None else 1.0) < IMBALANCE_MINORITY,
             "high_card_categoricals": high_card,
         },
     }

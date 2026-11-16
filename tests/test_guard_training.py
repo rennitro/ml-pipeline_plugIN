@@ -362,6 +362,59 @@ class ConnectorCalls(unittest.TestCase):
         self.assertIn("data_profile.json missing", reason)
 
 
+class AuditRegressions(unittest.TestCase):
+    """Paths the quality audit found broken. Code samples are assembled from pieces so this hook
+    does not read the test source itself as training code, test evaluation or a gate recording."""
+
+    LEDGER_NAME = "PIPE" + "LINE.md"
+    TRAIN = "clf = LogisticRegression()\nclf" + ".fit" + "(X_train, y_train)"
+    EVAL_ON_TEST = "f1" + "_score" + "(y_test, preds)"
+
+    def test_override_b_can_be_recorded_without_the_gate_artifacts(self):
+        decision, reason = run(write_md(LEDGER_A + OVERRIDE), pipeline_md=LEDGER_A, tool="Write", files=ARTIFACTS_A)
+        self.assertEqual(decision, "allow", reason)
+
+    def test_override_c_can_be_recorded_without_the_gate_artifacts(self):
+        edit = {"file_path": "./ml_pipeline/" + self.LEDGER_NAME, "old_string": "x",
+                "new_string": OVERRIDE_C[len(GATE_AB):]}
+        decision, reason = run(edit, pipeline_md=LEDGER_A, tool="Edit", files=ARTIFACTS_A)
+        self.assertEqual(decision, "allow", reason)
+
+    def test_override_without_reason_is_denied(self):
+        line = "- Override: Gate B - user approved skipping to training 2026-09-17\n"
+        decision, reason = run(write_md(LEDGER_A + GATE_A + line), pipeline_md=LEDGER_A, tool="Write", files=ARTIFACTS_A)
+        self.assertEqual(decision, "deny")
+        self.assertIn("needs the user's reason", reason)
+
+    def test_override_written_from_code_is_recognised(self):
+        code = {"file_path": "/x/record.py",
+                "content": f"open('ml_pipeline/{self.LEDGER_NAME}', 'a').write({OVERRIDE!r})"}
+        decision, reason = run(code, pipeline_md=LEDGER_A, tool="Write", files=ARTIFACTS_A)
+        self.assertEqual(decision, "allow", reason)
+
+    def test_unrelated_override_mentioning_model_does_not_unlock_training(self):
+        md = GATE_A + "- Override: red flag neural-net-small-data - user approved model choice 2026-09-17 - reason: pretrained\n"
+        decision, reason = run({"command": self.TRAIN}, md)
+        self.assertEqual(decision, "deny")
+        self.assertIn("locked until Gate B", reason)
+
+    def test_unrelated_override_mentioning_test_set_does_not_unlock_evaluation(self):
+        md = GATE_AB + "- Override: red flag accuracy-imbalanced - user approved accuracy on the test set 2026-09-18 - reason: x\n"
+        decision, reason = run({"command": self.EVAL_ON_TEST}, md)
+        self.assertEqual(decision, "deny")
+        self.assertIn("locked until Gate C", reason)
+
+    def test_time_series_cv_allowed_when_temporal_and_grouped(self):
+        files = profile_with(has_datetime=True, has_groups=True)
+        self.assertEqual(run({"command": "cv = TimeSeriesSplit(n_splits=5, gap=90)"}, GATE_AB, files=files)[0], "allow")
+        self.assertEqual(run({"command": "cv = KFold(n_splits=5)"}, GATE_AB, files=files)[0], "deny")
+
+    def test_time_series_cv_still_denied_when_only_grouped(self):
+        decision, reason = run({"command": "cv = TimeSeriesSplit(n_splits=5)"}, GATE_AB, files=profile_with(has_groups=True))
+        self.assertEqual(decision, "deny")
+        self.assertIn("red flag group-split", reason)
+
+
 class ClusteringMetrics(unittest.TestCase):
     """Segment-quality metrics count as evaluation, so the held-out set stays locked until Gate C."""
 

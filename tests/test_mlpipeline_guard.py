@@ -289,8 +289,11 @@ class Segmentation(unittest.TestCase):
     def _df(dates=False):
         return frame(dates=dates).drop(columns=["y"])
 
+    def _profile(self, dates=False):
+        return guard.profile(self._df(dates), task="clustering", state_dir=self.state)
+
     def test_profile_without_target(self):
-        p = guard.profile(self._df(), state_dir=self.state)
+        p = self._profile()
         self.assertIsNone(p["target"]["name"])
         self.assertEqual(p["traits"]["task"], "clustering")
         self.assertEqual(p["traits"]["n_features"], 2)
@@ -299,6 +302,7 @@ class Segmentation(unittest.TestCase):
         self.assertTrue((self.state / guard.PROFILE_FILE).is_file())
 
     def test_split_without_target_freezes_a_holdout(self):
+        self._profile()
         tr, va, te = guard.split(self._df(), state_dir=self.state)
         self.assertEqual((len(tr), len(va), len(te)), (600, 200, 200))
         state = json.loads((self.state / guard.STATE_FILE).read_text())
@@ -306,6 +310,7 @@ class Segmentation(unittest.TestCase):
         self.assertEqual(state["n_test"], 200)
 
     def test_temporal_split_is_still_required(self):
+        self._profile(dates=True)
         with self.assertRaises(guard.TemporalSplitRequired):
             guard.split(self._df(dates=True), state_dir=self.state)
         tr, va, te = guard.split(self._df(dates=True), time_col="date", state_dir=self.state)
@@ -319,7 +324,9 @@ class Segmentation(unittest.TestCase):
         self.assertIn("Strongest pair: ", self.md.read_text())
 
     def test_final_test_scores_features_and_labels_once(self):
+        self._profile()
         tr, va, te = guard.split(self._df(), state_dir=self.state)
+        self.md.write_text("- Gate C: approved 2026-09-18\n")
         seen = {}
 
         def segment_quality(features, labels):
@@ -335,6 +342,83 @@ class Segmentation(unittest.TestCase):
         self.assertIn("- Step 14 final test: segment_quality=0.5000", self.md.read_text())
         with self.assertRaises(guard.TestSetAlreadyUsed):
             guard.final_test(assign, te, metric_fn=segment_quality, state_dir=self.state, pipeline_md=self.md)
+
+
+class AuditRegressions(unittest.TestCase):
+    """Fail-open paths found by the quality audit: each must now fail closed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name) / "ml_pipeline"
+        self.md = self.state / "PIPELINE.md"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def zeros(X):
+        return np.zeros(len(X), dtype=int)
+
+    @staticmethod
+    def acc(y_true, y_pred):
+        return float((y_true == y_pred).mean())
+
+    # -- a profile without a target must say why
+    def test_profile_without_target_or_task_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            guard.profile(frame().drop(columns=["y"]), state_dir=self.state)
+        self.assertIn("task='target_pending'", str(ctx.exception))
+
+    def test_profile_with_target_and_task_raises(self):
+        with self.assertRaises(ValueError):
+            guard.profile(frame(), target="y", task="clustering", state_dir=self.state)
+
+    def test_pending_profile_reports_no_target_facts(self):
+        p = guard.profile(frame().drop(columns=["y"]), task="target_pending", state_dir=self.state)
+        self.assertEqual(p["traits"]["task"], "target_pending")
+        self.assertFalse(p["traits"]["imbalanced"])
+        self.assertEqual(p["leakage_suspects"], [])
+
+    # -- the split refuses a target the profile has not seen
+    def test_split_refuses_target_after_pending_profile(self):
+        guard.profile(frame().drop(columns=["y"]), task="target_pending", state_dir=self.state)
+        with self.assertRaises(guard.ProfileOutdated) as ctx:
+            guard.split(frame(), target="y", state_dir=self.state)
+        self.assertIn("re-run guard.profile", str(ctx.exception))
+        guard.profile(frame(), target="y", state_dir=self.state)
+        tr, va, te = guard.split(frame(), target="y", state_dir=self.state)
+        self.assertEqual(len(tr) + len(va) + len(te), 1000)
+
+    def test_split_without_target_needs_a_clustering_profile(self):
+        with self.assertRaises(guard.ProfileOutdated):
+            guard.split(frame().drop(columns=["y"]), state_dir=self.state)
+        guard.profile(frame().drop(columns=["y"]), task="target_pending", state_dir=self.state)
+        with self.assertRaises(guard.ProfileOutdated):
+            guard.split(frame().drop(columns=["y"]), state_dir=self.state)
+
+    def test_split_without_a_profile_still_works_with_a_target(self):
+        tr, va, te = guard.split(frame(), target="y", state_dir=self.state)
+        self.assertEqual(len(te), 200)
+
+    # -- the final test checks the third gate itself, however it is called
+    def test_final_test_before_gate_c_raises(self):
+        tr, va, te = guard.split(frame(), target="y", state_dir=self.state)
+        for ledger in ("", "- Gate B: approved 2026-09-17\n", "- Gate C: not yet approved\n",
+                       "- Override: red flag neural-net-small-data - user approved model test set 2026-09-17 - reason: x\n"):
+            self.md.write_text(ledger)
+            with self.assertRaises(guard.GateNotApproved):
+                guard.final_test(self.zeros, te, target="y", metric_fn=self.acc,
+                                 state_dir=self.state, pipeline_md=self.md)
+        state = json.loads((self.state / guard.STATE_FILE).read_text())
+        self.assertEqual(state["test_touches"], 0)
+
+    def test_final_test_after_gate_c_override_runs(self):
+        tr, va, te = guard.split(frame(), target="y", state_dir=self.state)
+        self.md.write_text("- Override: Gate C - user approved evaluating on the test set 2026-09-18 - reason: demo\n")
+        score = guard.final_test(self.zeros, te, target="y", metric_fn=self.acc,
+                                 state_dir=self.state, pipeline_md=self.md)
+        self.assertGreater(score, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

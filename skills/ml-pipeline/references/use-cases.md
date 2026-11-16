@@ -59,6 +59,11 @@ the target only from the *prediction window* after it. Set the windows at step 5
 the chronological split at step 6 builds on them, and `TimeSeriesSplit(gap=...)` must be at least
 the prediction window. Most "too good" results on these problems are windows that overlap.
 
+The raw data has no target yet, so step 1 profiles it with `guard.profile(df, task="target_pending")`.
+Once step 5 has built the one-row-per-customer table with its target, profile that table with
+`target=...`: only then do the class balance, the leakage suspects and the red flags describe the
+real problem, and `guard.split()` refuses the target until it has been profiled.
+
 ### One customer, several index dates
 
 The data is then both temporal and grouped. `guard.split(time_col=...)` wins and ignores
@@ -80,9 +85,10 @@ Compare against the business baseline at the same number of contacts.
 
 ## Segmentation: how the steps change
 
-There is no target, so pass `target=None` (or omit it) to `guard.profile`, `guard.eda_figures`,
-`guard.split` and `guard.final_test`. The gates, their figures, and the hook stay the same; a
-clustering fit is locked until Gate B like any other model.
+There is no target: profile with `guard.profile(df, task="clustering")`, then leave `target` out of
+`guard.eda_figures`, `guard.split` and `guard.final_test` (the split refuses to run without a
+clustering profile). The gates, their figures, and the hook stay the same; a clustering fit is
+locked until Gate B like any other model, and the final check until Gate C.
 
 | Step | Supervised | Segmentation |
 |---|---|---|

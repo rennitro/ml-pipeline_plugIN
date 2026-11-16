@@ -77,11 +77,14 @@ contract cards for **churn**, **customer lifetime value** and **customer segment
 index-date / observation-window / prediction-window discipline, how to turn a validation metric
 into business value before Gate C, and a one-page gate summary to send to a client.
 
-Segmentation has no target, so the guard library accepts `target=None`: `guard.profile()` records
-`task: clustering`, `guard.split()` still freezes a held-out set, and `guard.final_test()` scores
-the segments on it once with `metric_fn(features, labels)`. Gates and hooks are unchanged — a
-clustering fit is locked until Gate B like any other model. A gate line quoted in a shared document
-through an MCP connector is no longer mistaken for recording a gate.
+Problems without a target say so: `guard.profile(df, task="clustering")` for segmentation, or
+`task="target_pending"` when the target is only built at step 5 (churn, customer value) — then the
+step-5 table is profiled again with its target, and `guard.split()` refuses a target the profile has
+not seen. For segmentation `guard.split()` still freezes a held-out set and `guard.final_test()`
+scores the segments on it once with `metric_fn(features, labels)`. `guard.final_test()` also checks
+for Gate C itself, so passing `pipe.predict` cannot slip past the hook. Overrides unlock only what
+they name and must carry a reason. A gate line quoted in a shared document through an MCP connector
+is not mistaken for recording a gate.
 
 Prove it on the **canary**: `examples/canary/canary.csv` has a known honest ceiling of 0.80
 accuracy. Beat it and you leaked. `ML_PIPELINE_ENFORCE=0` switches enforcement off for non-ML
