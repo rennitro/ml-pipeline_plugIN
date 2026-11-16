@@ -5,6 +5,10 @@ Read at step 3 (when writing the prediction contract) and again before the Gate 
 simple model), judged on validation with the contract's metric. "Avoid" means: not without a
 written reason in the `Model rationale:` block.
 
+For the business framing of common problems (churn, customer value, segmentation) read
+`use-cases.md` next to this file; it says what the contract, the windows, and the business
+baseline usually are. This file then picks the model family.
+
 ## Tabular, small (`small_data`: fewer than 5,000 rows)
 - Baseline: majority-class / mean dummy, then logistic or linear regression with L2.
 - Strong default: gradient boosting with shallow trees (depth 2–4, strong regularization, early
@@ -71,6 +75,25 @@ written reason in the `Model rationale:` block.
 Text or images with fewer than 5,000 items: fine-tuning a pretrained model trips
 `neural-net-small-data`. Try the frozen-features baseline first; fine-tune only after the user agrees,
 recording the red-flag override with reason "pretrained backbone".
+
+## Skewed regression target (customer value, spend, counts)
+- Baseline: mean / median dummy, then the historical average per entity, then a regularized linear model.
+- Strong default: gradient boosting on a log-transformed target or with a Tweedie / Poisson objective;
+  a two-part model (will it be non-zero, then how much) when most targets are zero.
+- Metric: MAE (or median absolute error) plus rank quality; RMSE alone is ruled by a few large values.
+- Avoid: reporting error on the log scale only (the client reads money); dropping the zeros.
+
+## Clustering / segmentation (`task: clustering` — profiled with `target=None`)
+- Baseline: a rule the business already understands — RFM scoring or the existing segments.
+- Strong default: k-means or a Gaussian mixture on scaled features; k-prototypes or Gower distance
+  with hierarchical clustering when categoricals matter.
+- Choose the number of segments on validation with silhouette, segment sizes, and stability across
+  resamples and periods — and cap it at what the client can act on.
+- Metric: silhouette plus stability on the held-out period; the final check is
+  `guard.final_test(pipe.predict, test, metric_fn=silhouette_score)`, once.
+- Avoid: clustering unscaled features (the widest column decides everything); identifiers and
+  near-duplicate features; DBSCAN on high-dimensional tables; judging segments by silhouette alone
+  when nobody can name or use them. The step-by-step mapping is in `use-cases.md`.
 
 ## Interpretability required
 - Logistic / linear with monotone constraints, GAM / EBM, shallow trees; gradient boosting with

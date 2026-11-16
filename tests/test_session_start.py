@@ -36,6 +36,7 @@ class SessionStart(unittest.TestCase):
         self.assertIn("/plug/lib/mlpipeline_canary.py", context)
         self.assertIn("ml_pipeline/guard.py", context)
         self.assertIn("/plug/skills/ml-pipeline/references/model-selection.md", context)
+        self.assertIn("/plug/skills/ml-pipeline/references/use-cases.md", context)
 
     def test_windows_root_uses_forward_slashes(self):
         result = run({"CLAUDE_PLUGIN_ROOT": "C:\\plug\\"})

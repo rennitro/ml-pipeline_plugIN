@@ -11,6 +11,10 @@ canonical copy lives). Requires pandas and numpy, nothing else.
 keeps whole groups together when asked, checks that no row lands in two splits, and freezes a
 fingerprint of the test set in ``ml_pipeline/.guard_state.json``. ``final_test`` is the only
 sanctioned way to touch that test set, and it works once.
+
+Segmentation (clustering) has no target: pass ``target=None`` to ``profile``, ``eda_figures``,
+``split`` and ``final_test``. The held-out set then checks that the segments hold up on unseen
+rows, and ``metric_fn`` receives ``(features, labels)`` instead of ``(y_true, y_pred)``.
 """
 from __future__ import annotations
 
@@ -105,7 +109,7 @@ def _stratified_indices(df, target, test_size, val_size, rng):
 def split(
     df: pd.DataFrame,
     *,
-    target: str,
+    target: str | None = None,
     time_col: str | None = None,
     group_col: str | None = None,
     test_size: float = 0.2,
@@ -116,7 +120,7 @@ def split(
     """Split into (train, val, test) the way the pipeline's step 6 requires, and freeze the test set."""
     if not (0 < test_size < 1 and 0 <= val_size < 1 and test_size + val_size < 1):
         raise ValueError("test_size and val_size must be in (0, 1) and sum to less than 1")
-    if target not in df.columns:
+    if target is not None and target not in df.columns:
         raise KeyError(f"target column {target!r} not in frame")
     if time_col is None and (dt_cols := _datetime_columns(df)):
         raise TemporalSplitRequired(
@@ -135,7 +139,7 @@ def split(
         kind, parts = "time", _time_indices(df, time_col, n_train, n_val)
     elif group_col is not None:
         kind, parts = "group", _group_indices(df, group_col, n_test, n_val, rng)
-    elif df[target].nunique() <= STRATIFY_MAX_CLASSES:
+    elif target is not None and df[target].nunique() <= STRATIFY_MAX_CLASSES:
         kind, parts = "stratified", _stratified_indices(df, target, test_size, val_size, rng)
     else:
         perm = rng.permutation(n)
@@ -179,7 +183,7 @@ def final_test(
     predict_fn,
     test: pd.DataFrame,
     *,
-    target: str,
+    target: str | None = None,
     metric_fn,
     state_dir: str | Path = "ml_pipeline",
     pipeline_md: str | Path = "ml_pipeline/PIPELINE.md",
@@ -188,6 +192,9 @@ def final_test(
 
     A second call needs an ``- Override: final test - ...`` line in PIPELINE.md, which the skill
     only writes after the user agreed a new test strategy.
+
+    With ``target=None`` (segmentation) ``predict_fn`` assigns segments to the held-out rows and
+    ``metric_fn(features, labels)`` scores them, e.g. a silhouette score.
     """
     state_path = Path(state_dir) / STATE_FILE
     pipeline_md = Path(pipeline_md)
@@ -202,8 +209,11 @@ def final_test(
             "and record `- Override: final test - ...` in PIPELINE.md before evaluating again"
         )
 
-    features = test.drop(columns=[target])
-    score = float(metric_fn(test[target].to_numpy(), np.asarray(predict_fn(features))))
+    if target is None:
+        score = float(metric_fn(test, np.asarray(predict_fn(test))))
+    else:
+        features = test.drop(columns=[target])
+        score = float(metric_fn(test[target].to_numpy(), np.asarray(predict_fn(features))))
 
     state["test_touches"] += 1
     state_path.write_text(json.dumps(state, indent=2))
@@ -287,6 +297,9 @@ def _column_stats(full: pd.Series, sample: pd.Series, kind: str) -> dict:
     return info
 
 
+NO_TARGET = {"name": None, "task": "clustering", "n_classes": None, "class_balance": None, "minority_frac": None}
+
+
 def _target_info(y: pd.Series) -> dict:
     values = y.dropna()
     n_unique = int(values.nunique())
@@ -340,7 +353,7 @@ def _entity_candidates(df: pd.DataFrame, kinds: dict) -> list[str]:
 def profile(
     df: pd.DataFrame,
     *,
-    target: str,
+    target: str | None = None,
     time_col: str | None = None,
     group_col: str | None = None,
     state_dir: str | Path = "ml_pipeline",
@@ -348,15 +361,16 @@ def profile(
     """Step 1: describe the data and write ml_pipeline/data_profile.json.
 
     Everything later in the pipeline — figures, the model playbook, the hook's red flags — reads
-    this file instead of re-deriving facts from the data.
+    this file instead of re-deriving facts from the data. ``target=None`` profiles a segmentation
+    problem: the task is "clustering" and there is no class balance or target leakage to report.
     """
-    if target not in df.columns:
+    if target is not None and target not in df.columns:
         raise KeyError(f"target column {target!r} not in frame")
     n = len(df)
     sampled = n > SAMPLE_ROWS
     sample = df.sample(SAMPLE_ROWS, random_state=0) if sampled else df
     kinds = {col: _column_kind(df[col]) for col in df.columns}
-    target_info = _target_info(df[target])
+    target_info = dict(NO_TARGET) if target is None else _target_info(df[target])
     columns = {str(col): _column_stats(df[col], sample[col], kinds[col]) for col in df.columns}
     high_card = [str(c) for c, k in kinds.items() if k == "categorical" and columns[str(c)].get("n_levels", 0) > HIGH_CARD_LEVELS]
     datetime_cols = [str(c) for c, k in kinds.items() if k == "datetime"]
@@ -376,14 +390,15 @@ def profile(
         "time_col": time_col,
         "group_col": group_col,
         "entity_candidates": [str(c) for c in _entity_candidates(df, kinds)],
-        "leakage_suspects": _leakage_suspects(sample, target, time_col, kinds, target_info["task"]),
+        "leakage_suspects": ([] if target is None
+                             else _leakage_suspects(sample, target, time_col, kinds, target_info["task"])),
         "traits": {
-            "n_rows": int(n), "n_features": int(df.shape[1] - 1), "task": target_info["task"],
+            "n_rows": int(n), "n_features": int(df.shape[1] - (0 if target is None else 1)), "task": target_info["task"],
             "minority_frac": minority,
             "has_datetime": bool(datetime_cols) or time_col is not None,
             "has_groups": group_col is not None,
             "small_data": n < SMALL_DATA_ROWS,
-            "imbalanced": target_info["task"] != "regression" and (minority if minority is not None else 1.0) < IMBALANCE_MINORITY,
+            "imbalanced": target_info["task"] not in ("regression", "clustering") and (minority if minority is not None else 1.0) < IMBALANCE_MINORITY,
             "high_card_categoricals": high_card,
         },
     }
@@ -432,9 +447,12 @@ def fig(step: int, name: str, figure, explanation: str, state_dir: str | Path = 
     return path
 
 
-def eda_figures(df: pd.DataFrame, *, target: str, time_col: str | None = None,
+def eda_figures(df: pd.DataFrame, *, target: str | None = None, time_col: str | None = None,
                 state_dir: str | Path = "ml_pipeline") -> list[Path]:
-    """The required step 1-2 figures, each with an explanation computed from the data."""
+    """The required step 1-2 figures, each with an explanation computed from the data.
+
+    With ``target=None`` (segmentation) the target-balance figure is skipped.
+    """
     plt = _plt()
     paths: list[Path] = []
     n = len(df)
@@ -449,22 +467,23 @@ def eda_figures(df: pd.DataFrame, *, target: str, time_col: str | None = None,
                      f"{n_missing} of {len(missing)} columns have missing values; worst is {missing.index[0]} "
                      f"at {missing.iloc[0]:.1%}." if n_missing else "No column has missing values.", state_dir))
 
-    y = df[target]
-    f, ax = plt.subplots(figsize=(6, 4))
-    if pd.api.types.is_numeric_dtype(y) and not pd.api.types.is_bool_dtype(y) and y.nunique() > 20:
-        ax.hist(y.dropna(), bins=30)
-        ax.set_title(f"Target {target} distribution")
-        explanation = (f"{target} ranges {y.min():.3g} to {y.max():.3g} with median {y.median():.3g}; "
-                       "a mean-predictor baseline is the number to beat.")
-    else:
-        balance = y.astype(str).value_counts(normalize=True)
-        ax.bar(balance.index, balance.to_numpy())
-        ax.set_title(f"Target {target} balance")
-        explanation = (f"{target}={balance.index[0]} is {balance.iloc[0]:.1%} of {n:,} rows, so a majority-class "
-                       f"dummy scores {balance.iloc[0]:.1%}; the minority share is {balance.min():.1%}.")
-    paths.append(fig(2, "target_balance", f, explanation, state_dir))
+    if target is not None:
+        y = df[target]
+        f, ax = plt.subplots(figsize=(6, 4))
+        if pd.api.types.is_numeric_dtype(y) and not pd.api.types.is_bool_dtype(y) and y.nunique() > 20:
+            ax.hist(y.dropna(), bins=30)
+            ax.set_title(f"Target {target} distribution")
+            explanation = (f"{target} ranges {y.min():.3g} to {y.max():.3g} with median {y.median():.3g}; "
+                           "a mean-predictor baseline is the number to beat.")
+        else:
+            balance = y.astype(str).value_counts(normalize=True)
+            ax.bar(balance.index, balance.to_numpy())
+            ax.set_title(f"Target {target} balance")
+            explanation = (f"{target}={balance.index[0]} is {balance.iloc[0]:.1%} of {n:,} rows, so a majority-class "
+                           f"dummy scores {balance.iloc[0]:.1%}; the minority share is {balance.min():.1%}.")
+        paths.append(fig(2, "target_balance", f, explanation, state_dir))
 
-    numeric = df.select_dtypes("number").drop(columns=[target], errors="ignore").iloc[:, :12]
+    numeric = df.select_dtypes("number").drop(columns=[target] if target else [], errors="ignore").iloc[:, :12]
     if numeric.shape[1]:
         cols = numeric.shape[1]
         rows = int(np.ceil(cols / 4))
@@ -481,7 +500,7 @@ def eda_figures(df: pd.DataFrame, *, target: str, time_col: str | None = None,
                          f"({', '.join(skewed[:5]) or 'none'}), which matters for scaling and outliers.", state_dir))
 
     with_target = df.select_dtypes("number").iloc[:, :30]
-    if target in df.columns and target not in with_target.columns:
+    if target is not None and target in df.columns and target not in with_target.columns:
         with_target = with_target.assign(**{target: pd.factorize(df[target])[0]})
     if with_target.shape[1] >= 2:
         corr = with_target.corr()
@@ -494,8 +513,14 @@ def eda_figures(df: pd.DataFrame, *, target: str, time_col: str | None = None,
         f.colorbar(image)
         ax.set_title("Correlations")
         ranked = corr[target].drop(target).abs().sort_values(ascending=False) if target in corr.columns else pd.Series(dtype=float)
-        explanation = (f"Strongest correlation with {target}: {ranked.index[0]} ({ranked.iloc[0]:.2f}); anything "
-                       "above 0.95 is a leakage suspect." if len(ranked) else "Correlations between numeric features.")
+        if len(ranked):
+            explanation = (f"Strongest correlation with {target}: {ranked.index[0]} ({ranked.iloc[0]:.2f}); anything "
+                           "above 0.95 is a leakage suspect.")
+        else:
+            pairs = corr.abs().where(~np.eye(len(corr), dtype=bool)).stack()
+            explanation = (f"Strongest pair: {pairs.idxmax()[0]} and {pairs.idxmax()[1]} ({pairs.max():.2f}); "
+                           "near-duplicate features count twice in a distance-based segmentation."
+                           if len(pairs) else "Correlations between numeric features.")
         paths.append(fig(2, "correlations", f, explanation, state_dir))
 
     datetime_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]

@@ -273,5 +273,68 @@ class Figures(unittest.TestCase):
             del sys.modules["matplotlib"]
             sys.modules.update(saved)
 
+
+class Segmentation(unittest.TestCase):
+    """target=None: clustering has no target, but the split and the single-use holdout still apply."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name) / "ml_pipeline"
+        self.md = self.state / "PIPELINE.md"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _df(dates=False):
+        return frame(dates=dates).drop(columns=["y"])
+
+    def test_profile_without_target(self):
+        p = guard.profile(self._df(), state_dir=self.state)
+        self.assertIsNone(p["target"]["name"])
+        self.assertEqual(p["traits"]["task"], "clustering")
+        self.assertEqual(p["traits"]["n_features"], 2)
+        self.assertFalse(p["traits"]["imbalanced"])
+        self.assertEqual(p["leakage_suspects"], [])
+        self.assertTrue((self.state / guard.PROFILE_FILE).is_file())
+
+    def test_split_without_target_freezes_a_holdout(self):
+        tr, va, te = guard.split(self._df(), state_dir=self.state)
+        self.assertEqual((len(tr), len(va), len(te)), (600, 200, 200))
+        state = json.loads((self.state / guard.STATE_FILE).read_text())
+        self.assertEqual(state["split"], "random")
+        self.assertEqual(state["n_test"], 200)
+
+    def test_temporal_split_is_still_required(self):
+        with self.assertRaises(guard.TemporalSplitRequired):
+            guard.split(self._df(dates=True), state_dir=self.state)
+        tr, va, te = guard.split(self._df(dates=True), time_col="date", state_dir=self.state)
+        self.assertLessEqual(tr["date"].max(), va["date"].min())
+        self.assertLessEqual(va["date"].max(), te["date"].min())
+
+    def test_eda_figures_skip_the_target_figure(self):
+        paths = guard.eda_figures(self._df(), state_dir=self.state)
+        self.assertEqual(sorted(p.name for p in paths),
+                         ["01_missingness.png", "02_correlations.png", "02_distributions.png"])
+        self.assertIn("Strongest pair: ", self.md.read_text())
+
+    def test_final_test_scores_features_and_labels_once(self):
+        tr, va, te = guard.split(self._df(), state_dir=self.state)
+        seen = {}
+
+        def segment_quality(features, labels):
+            seen["shape"], seen["n_labels"] = features.shape, len(labels)
+            return 0.5
+
+        def assign(features):
+            return np.zeros(len(features), dtype=int)
+
+        score = guard.final_test(assign, te, metric_fn=segment_quality, state_dir=self.state, pipeline_md=self.md)
+        self.assertEqual(score, 0.5)
+        self.assertEqual(seen, {"shape": te.shape, "n_labels": len(te)})
+        self.assertIn("- Step 14 final test: segment_quality=0.5000", self.md.read_text())
+        with self.assertRaises(guard.TestSetAlreadyUsed):
+            guard.final_test(assign, te, metric_fn=segment_quality, state_dir=self.state, pipeline_md=self.md)
+
 if __name__ == "__main__":
     unittest.main()

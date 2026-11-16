@@ -12,6 +12,8 @@ request to *start the pipeline at step 1*, not at step 10.
 ## The pipeline (strict order — never reorder, never skip silently)
 
 ```
+BUSINESS QUESTION
+  → 0. Business framing + data intake (before the data is opened)
 RAW DATA
   → 1. Data inspection
   → 2. Exploratory data analysis (EDA)
@@ -50,6 +52,11 @@ At each gate, STOP and give the user, in plain non-jargon language:
    includes the `Model rationale:` block (format under Progress tracking).
 5. **The question** — ask for explicit permission to continue. Wait for a clear yes.
    Silence, ambiguity, or "hmm" is not a yes. If the user redirects, incorporate it.
+
+When the work is for a client, the client is asked before the gate is recorded: send the one-page
+gate summary from `references/use-cases.md` (same five points plus the client's written decision),
+and treat "continue with changes" as not yet a yes. The gate line in PIPELINE.md is still recorded
+by the user running the pipeline.
 
 If the user says "skip ahead" or "just train it": explain in 2–3 sentences which steps are
 missing and the concrete risk (usually leakage or garbage-in), then ask once for explicit
@@ -107,6 +114,12 @@ Model rationale:
 
 ## What each step must produce
 
+0. **Business framing and data intake** — before the data is opened, write a `Business framing:`
+   block in PIPELINE.md: the decision the model supports, the use case (pick a card from
+   `references/use-cases.md` — churn, customer value, segmentation — and note how this case differs),
+   the rule or estimate used today (it becomes the business baseline at step 9), and what result is
+   good enough. List the data requested, the period each table covers, and its join key. The hook
+   does not check this block; step 3 cannot be written well without it.
 1. **Data inspection** — copy the plugin's guard library to `ml_pipeline/guard.py` (its path is given at
    session start; in Codex/Kimi it is `skills/ml-pipeline/lib/mlpipeline_guard.py` next to this file),
    load the raw data read-only, and run `guard.profile(df, target=..., time_col=..., group_col=...)`.
@@ -130,9 +143,10 @@ Model rationale:
 3. **Define the prediction problem** — write a short contract: target (exact definition,
    units), prediction unit and population, prediction time/horizon, information actually
    available at prediction time, objective, evaluation metric, constraints. **The user must
-   approve this contract at Gate A** — it controls everything after. Consult
-   `references/model-selection.md` with the profile's traits when choosing the metric and the
-   candidate model families.
+   approve this contract at Gate A** — it controls everything after. Start from the matching card
+   in `references/use-cases.md` (index date, observation and prediction windows, typical leakage,
+   business baseline), then consult `references/model-selection.md` with the profile's traits when
+   choosing the metric and the candidate model families.
 4. **Data cleaning** — missing values, duplicates, invalid/impossible values, inconsistent
    categories, unit/format issues. Report before/after counts for every rule, drawn as a `04_*`
    figure (Gate B needs it). Document every rule in PIPELINE.md. Prefer preserving data over
@@ -149,13 +163,16 @@ Model rationale:
    The test set is touched exactly once, at step 14, through `guard.final_test()`. If the guard
    raises a `LeakageError` (`TemporalSplitRequired`, `OverlapLeakage`, `TestSetTampered`,
    `TestSetAlreadyUsed`), stop and tell the user; never cast away a date column or delete
-   `.guard_state.json` to get past it.
+   `.guard_state.json` to get past it. When the data is both temporal and grouped (one customer,
+   several index dates) the time split wins: count the entities that appear in more than one split
+   and report the number at Gate B.
 7. **Feature engineering** — design features on the training set's statistics only, then
    apply the same transformations to validation/test.
 8. **Preprocessing** — scalers, encoders, imputers fit on train only, wrapped in a pipeline
    object so train and inference can never diverge.
 9. **Baseline first** — a dummy predictor (majority class / mean) AND one simple model
-   (logistic/linear regression or small tree). Record their metrics. Every later model is
+   (logistic/linear regression or small tree), plus the business baseline from step 0 when there
+   is one (the rule the client uses today). Record their metrics. Every later model is
    judged against this line; a complex model that can't beat it gets reported as such.
 10. **Model training** — train candidate models on train, compare on validation. Log every
     run's config and score.
@@ -164,7 +181,9 @@ Model rationale:
 12. **Model evaluation** — the contract's metric plus supporting views: confusion matrix and
     ROC/PR curves for classification, residual plots for regression, always compared to the
     baseline. Report the CV spread (± std) or a bootstrap interval, not a single number. Figures
-    required.
+    required. Before Gate C, translate the metric into the business terms from step 0 (value kept
+    minus cost of acting, at the volume the client can handle) and derive the decision threshold
+    from it on validation; if the costs are unknown, say the threshold is provisional.
 13. **Error analysis** — on the validation set, never test: worst predictions, performance by
     slice/subgroup, calibration, where the model fails and a hypothesis for why. At least one
     `13_*` figure (Gate D needs it).
@@ -182,6 +201,16 @@ Model rationale:
 16. **Monitoring + retraining** — write down: what drift to watch (input and prediction
     distributions), what metric threshold triggers retraining, and how retraining reuses
     this same pipeline from step 1.
+
+## Segmentation and other problems without a target
+
+Clustering runs through the same 16 steps and the same gates. Pass `target=None` (or leave it out)
+to `guard.profile`, `guard.eda_figures`, `guard.split` and `guard.final_test`: the profile records
+`task: clustering`, the split still holds out a frozen set (a later period when the data has
+dates), and `guard.final_test(pipe.predict, test, metric_fn=...)` calls `metric_fn(features,
+labels)` once to check that the segments hold on unseen rows. The baseline is a rule the business
+already uses (RFM, existing segments); the contract states what the segments are for and how many
+the client can act on. The step-by-step mapping is in `references/use-cases.md`.
 
 ## Enforcement in Claude Code (hook)
 
@@ -207,6 +236,9 @@ A PostToolUse hook also warns (never blocks) when a result looks too good to be 
 mentions dates. To prove a pipeline does not leak, run it on `examples/canary/canary.csv`: honest
 test accuracy cannot exceed 0.80, and `mlpipeline_canary.verdict(score, n_test)` says whether a
 number is above the ceiling.
+
+A gate line quoted in prose — a skill doc, a shared document or ticket written through a
+connector — records nothing and is not checked; only a write to PIPELINE.md itself is.
 
 A denial is not an obstacle to route around: do the missing steps, get the user's explicit
 approval, record the gate line, and retry. The hook fails open on its own errors, and

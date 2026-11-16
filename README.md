@@ -69,6 +69,20 @@ are denied outright from the profile: a neural net on a small table, a random sp
 data, a non-group split on grouped data, accuracy as the selection metric on an imbalanced target,
 and resampling before the split.
 
+## Business use cases
+
+`skills/ml-pipeline/references/use-cases.md` adds the business layer on top of the 16 steps: a
+step 0 (the decision the model supports, the rule used today, the data to request), pre-filled
+contract cards for **churn**, **customer lifetime value** and **customer segmentation**, the
+index-date / observation-window / prediction-window discipline, how to turn a validation metric
+into business value before Gate C, and a one-page gate summary to send to a client.
+
+Segmentation has no target, so the guard library accepts `target=None`: `guard.profile()` records
+`task: clustering`, `guard.split()` still freezes a held-out set, and `guard.final_test()` scores
+the segments on it once with `metric_fn(features, labels)`. Gates and hooks are unchanged — a
+clustering fit is locked until Gate B like any other model. A gate line quoted in a shared document
+through an MCP connector is no longer mistaken for recording a gate.
+
 Prove it on the **canary**: `examples/canary/canary.csv` has a known honest ceiling of 0.80
 accuracy. Beat it and you leaked. `ML_PIPELINE_ENFORCE=0` switches enforcement off for non-ML
 projects. Codex and Kimi get the same rules as instructions (no hook support there).

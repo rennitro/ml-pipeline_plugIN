@@ -348,5 +348,36 @@ class FailOpen(unittest.TestCase):
         self.assertIn("hook error", result["systemMessage"])
 
 
+class ConnectorCalls(unittest.TestCase):
+    """An MCP connector call is prose unless one of its path arguments is the ledger file."""
+
+    def test_shared_doc_quoting_a_gate_line_is_allowed(self):
+        doc = {"payload": {"ops": [{"content": "Record it in PIPELINE.md:\n" + GATE_AB}]}}
+        self.assertEqual(run(doc, pipeline_md="", tool="mcp__docs__update")[0], "allow")
+
+    def test_connector_writing_the_ledger_file_is_checked(self):
+        call = {"path": "ml_pipeline/PIPELINE.md", "content": GATE_A}
+        decision, reason = run(call, pipeline_md="", tool="mcp__filesystem__write_file")
+        self.assertEqual(decision, "deny")
+        self.assertIn("data_profile.json missing", reason)
+
+
+class ClusteringMetrics(unittest.TestCase):
+    """Segment-quality metrics count as evaluation, so the held-out set stays locked until Gate C."""
+
+    METRIC = "silhouette_score"
+
+    def test_segment_quality_on_test_before_gate_c_denied(self):
+        decision, reason = run({"command": f"{self.METRIC}(X_test, labels)"}, GATE_AB)
+        self.assertEqual(decision, "deny")
+        self.assertIn("locked until Gate C", reason)
+
+    def test_segment_quality_on_validation_is_fine(self):
+        self.assertEqual(run({"command": f"{self.METRIC}(X_val, labels)"}, GATE_AB)[0], "allow")
+
+    def test_segment_quality_on_test_after_gate_c_allowed(self):
+        self.assertEqual(run({"command": f"{self.METRIC}(X_test, labels)"}, GATE_ABC)[0], "allow")
+
+
 if __name__ == "__main__":
     unittest.main()

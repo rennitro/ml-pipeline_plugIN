@@ -23,7 +23,9 @@ def main() -> int:
         f"{lib}/mlpipeline_guard.py - copy it to ml_pipeline/guard.py at step 1 (profile) and use "
         "guard.profile() / guard.eda_figures() / guard.fig() / guard.split() / guard.final_test(); model-selection "
         f"playbook at {root}/skills/ml-pipeline/references/model-selection.md (read at step 3 "
-        f"and before Gate B); canary dataset generator at {lib}/mlpipeline_canary.py "
+        f"and before Gate B); business use-case cards (churn, customer value, segmentation) at "
+        f"{root}/skills/ml-pipeline/references/use-cases.md (read at step 0 and step 3); "
+        f"canary dataset generator at {lib}/mlpipeline_canary.py "
         "(honest accuracy ceiling 0.80; above it means leakage)."
     )
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}))
