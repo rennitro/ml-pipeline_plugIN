@@ -28,6 +28,7 @@ PIPELINE_REL = Path("ml_pipeline") / "PIPELINE.md"
 SEARCH_UP = 4  # look in cwd and this many parent directories
 DOC_SUFFIXES = {".md", ".markdown", ".rst", ".txt", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini"}
 SKIP_KEYS = {"old_string", "file_path", "path", "notebook_path", "description", "url", "pattern", "glob", "cwd"}
+LEDGER_PATH_KEYS = ("file_path", "notebook_path", "path", "filename", "file")
 SNIPPET = 80
 
 # ------------------------------------------------------------------ detection
@@ -44,7 +45,8 @@ EVAL_CALL = re.compile(
     r"\b(?:accuracy_score|balanced_accuracy_score|roc_auc_score|average_precision_score|f1_score|"
     r"precision_score|recall_score|log_loss|mean_squared_error|mean_absolute_error|"
     r"root_mean_squared_error|r2_score|classification_report|confusion_matrix|cross_val_score|"
-    r"cross_validate))\s*\("
+    r"cross_validate|silhouette_score|davies_bouldin_score|calinski_harabasz_score|"
+    r"adjusted_rand_score))\s*\("
 )
 ESTIMATOR = re.compile(
     r"\b\w*(?:Classifier|Regressor|Regression|Ridge|Lasso|ElasticNet|SVC|SVR|NB|KNeighbors|MLP|"
@@ -67,8 +69,16 @@ COMMENT = re.compile(r"#[^\n]*")
 GATE_LINE = re.compile(r"^.*\bgate\s*[\[(]?([abcd])\b.*$", re.I | re.M)
 APPROVED = re.compile(r"\b(?:approved|approved-gate|overridden|override)\b", re.I)
 NEGATED = re.compile(r"\b(?:not|pending|awaiting|waiting|todo|unapproved|blocked|in progress)\b", re.I)
-OVERRIDE_LINE = re.compile(r"^.*\boverrid(?:e|den)\b.*\b(?:train|training|model|models|gate\s*b)\b.*$", re.I | re.M)
-OVERRIDE_C_LINE = re.compile(r"^.*\boverrid(?:e|den)\b.*\b(?:gate\s*c|final test|test set)\b.*$", re.I | re.M)
+# Overrides are recognised only in their documented shape, `- Override: <what> - ... - reason: ...`.
+# A looser match let any override that merely mentioned "model" or "test set" unlock a gate.
+OVERRIDE_HEAD = r"^[ \t]*(?:[-*][ \t]*)?\**[ \t]*override[ \t]*\**[ \t]*:[ \t]*"
+OVERRIDE_LINE = re.compile(OVERRIDE_HEAD + r"gate[ \t]*b\b.*$", re.I | re.M)
+OVERRIDE_C_LINE = re.compile(OVERRIDE_HEAD + r"(?:gate[ \t]*c|final[ \t]+test)\b.*$", re.I | re.M)
+# Where a gate is being recorded, an override may sit inside code (`write_text("- Override: ...")`),
+# so it is found anywhere on the line - but only in its documented kinds, never a bare `override:`.
+OVERRIDE_ANY = re.compile(r"\boverride[ \t]*\**[ \t]*:[ \t]*(?:gate[ \t]*[abcd]\b|red[ \t]+flag\b|final[ \t]+test\b)[^\n]*",
+                          re.I)
+REASON = re.compile(r"\breason[ \t]*:[ \t]*\S", re.I)
 
 # ------------------------------------------------------------------ messages
 NO_PIPELINE_MSG = (
@@ -114,16 +124,50 @@ RATIONALE_BULLETS = ("traits", "baseline", "candidates", "ruled out", "metric")
 LEDGER = re.compile(r"^\s*-\s*Figure\s+(\S+\.png):\s*\S", re.I | re.M)
 FINAL_TEST_LINE = re.compile(r"^\s*-\s*Step 14 final test:", re.I | re.M)
 GATE_RECORD_MSG = "ml-pipeline: Gate {0} can't be recorded: {1}."
+OVERRIDE_REASON_MSG = ("ml-pipeline: an override needs the user's reason ({0!r}). Write it as "
+                       "'- Override: <what> - user approved <what> YYYY-MM-DD - reason: <why>'.")
 
 
 def approved_gates_in(text: str) -> list[str]:
-    """Gate letters that ``text`` records as approved (non-negated lines only)."""
+    """Gate letters that ``text`` records as approved (non-negated lines only).
+
+    Override lines are not approvals: an override is the user's informed choice to go ahead
+    *without* the gate's artifacts, so checking those artifacts would make it impossible to record.
+    """
     gates = []
     for match in GATE_LINE.finditer(text):
         line = match.group(0)
+        if OVERRIDE_ANY.search(line):
+            continue
         if APPROVED.search(line) and not NEGATED.search(line):
             gates.append(match.group(1).upper())
     return gates
+
+
+def overrides_without_reason(text: str) -> list[str]:
+    """Override lines in ``text`` that give no reason; an override must say why."""
+    return [m.group(0).strip()[:80] for m in OVERRIDE_ANY.finditer(text)
+            if not NEGATED.search(m.group(0)) and not REASON.search(m.group(0))]
+
+
+def writes_ledger(tool_input: dict, text: str, tool_name: str = "") -> bool:
+    """Whether this call can record a gate: it edits PIPELINE.md, or is code/a command naming it.
+
+    Gates are only ever read from PIPELINE.md, so a gate line anywhere else (a grep, a skill doc,
+    a commit message) records nothing and must not be checked as a recording.
+    """
+    ledger = Path(os.environ.get("ML_PIPELINE_FILE") or PIPELINE_REL).name
+    if tool_name.startswith("mcp__"):
+        # A connector call (a shared doc, a ticket, a chat message) is prose, not a command: it
+        # records a gate only when one of its path arguments is the ledger file itself.
+        return any(Path(str(tool_input.get(key) or "")).name == ledger for key in LEDGER_PATH_KEYS)
+    target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+    if target:
+        if Path(target).name == ledger:
+            return True
+        if Path(target).suffix.lower() in DOC_SUFFIXES:
+            return False
+    return ledger in text
 
 
 def rationale_missing(text: str) -> list[str]:
@@ -188,6 +232,7 @@ RED_FLAGS = [
      "the minority class is {minority_pct} of rows, so accuracy rewards ignoring it - select on average_precision, f1, or balanced_accuracy"),
 ]
 RESAMPLE = re.compile(r"fit_resample\s*\(([^)]*)\)")
+GROUP_SPLIT_NOT_TIME = re.compile(r"\b(?:train_test_split|KFold|StratifiedKFold|ShuffleSplit|RepeatedKFold)\s*\(")
 OVERRIDE_FLAG = re.compile(r"^.*\boverrid(?:e|den)\b.*\bred flag\s+([a-z-]+)\b.*$", re.I | re.M)
 RED_FLAG_MSG = "ml-pipeline: red flag {0}: {1}. Override with '- Override: red flag {0} - ...' in ml_pipeline/PIPELINE.md."
 
@@ -215,6 +260,10 @@ def red_flag(code: str, traits: dict, overrides: set[str]) -> str | None:
         if name in overrides or not applies(traits) or not pattern.search(code):
             continue
         if name == "neural-net-small-data" and not trains:
+            continue
+        if name == "group-split" and traits.get("has_datetime") and not GROUP_SPLIT_NOT_TIME.search(code):
+            # Temporal and grouped: guard.split(time_col=...) wins, so a time-ordered CV is the
+            # consistent choice; the skill has the overlapping entities counted and reported.
             continue
         return RED_FLAG_MSG.format(name, why.format(**values))
     if "resample-before-split" not in overrides:
@@ -364,9 +413,14 @@ def main() -> int:
         payload = json.load(sys.stdin)
         tool_input = payload.get("tool_input") or {}
         cwd = payload.get("cwd") or os.getcwd()
+        tool_name = str(payload.get("tool_name") or "")
         text = "\n".join(_strings(tool_input))
-        # 1. Recording a gate: that gate's artifacts must already exist.
-        for gate in approved_gates_in(text):
+        # 1. Recording a gate: that gate's artifacts must already exist; an override must give a reason.
+        records = writes_ledger(tool_input, text, tool_name)
+        missing_reason = overrides_without_reason(text) if records else []
+        if missing_reason:
+            return _emit(OVERRIDE_REASON_MSG.format(missing_reason[0]))
+        for gate in approved_gates_in(text) if records else []:
             state_dir = _state_dir_for(tool_input, cwd)
             pipeline_md = state_dir / "PIPELINE.md"
             existing = pipeline_md.read_text(encoding="utf-8", errors="replace") if pipeline_md.is_file() else ""
